@@ -56,10 +56,18 @@ def _num(s):
 
 
 def parse_status(src):
-    """Devolve (linhas, excerto). Linhas: (point_id, status, last_updated)."""
-    rows, excerpt = [], None
+    """Devolve (linhas, excerto, publication_time).
+
+    Linhas: (point_id, status, last_updated). publication_time é o texto do
+    primeiro elemento <publicationTime> (hora de geração do ficheiro).
+    """
+    rows, excerpt, pub = [], None, None
     for _, el in etree.iterparse(src, events=("end",), huge_tree=True):
-        if _ln(el) != "refillPointStatus":
+        name = _ln(el)
+        if pub is None and name == "publicationTime":
+            pub = _text(el)
+            continue
+        if name != "refillPointStatus":
             continue
         if excerpt is None:
             excerpt = etree.tostring(el, encoding="unicode")[:1500]
@@ -72,7 +80,7 @@ def parse_status(src):
         if pid:
             rows.append((pid, _text(st_el) or "", lu))
         el.clear(keep_tail=True)
-    return rows, excerpt
+    return rows, excerpt, pub
 
 
 INFRA_FIELDS = [

@@ -52,13 +52,20 @@ def export():
                 if how == "copy":
                     shutil.copy2(src, dst_dir / src.name)
                 else:
-                    df = pd.read_csv(src, dtype=str, compression="gzip")
-                    if "ts_utc" in df:
-                        df["ts_utc"] = pd.to_datetime(df["ts_utc"], utc=True)
-                    for col in ("ok", "n_points", "n_events", "bytes", "present"):
+                    df = pd.read_csv(src, dtype=str, compression="gzip", keep_default_na=False)
+                    for col in ("ts_utc", "pub_utc", "fetch_utc"):
+                        if col in df:
+                            df[col] = pd.to_datetime(df[col].replace("", None), utc=True,
+                                                     format="ISO8601")
+                    for col in ("ok", "http", "n_points", "n_events", "bytes", "present"):
                         if col in df:
                             df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
-                    df.to_parquet(dst_dir / f"{day}.parquet", index=False, compression="zstd")
+                    for col in ("age_s", "secs"):
+                        if col in df:
+                            df[col] = pd.to_numeric(df[col], errors="coerce")
+                    # 2026-09-24.csv.gz -> 2026-09-24.parquet ; 2026-09-24.v1.csv.gz -> 2026-09-24.v1.parquet
+                    stem = src.name[:-len(".csv.gz")]
+                    df.to_parquet(dst_dir / f"{stem}.parquet", index=False, compression="zstd")
                 done.append(str(src))
 
     # Instantâneo do inventário, só quando muda.

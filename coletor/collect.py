@@ -46,18 +46,46 @@ def lisbon_date(dt):
     return dt.astimezone(C.TZ).date().isoformat()
 
 
-def fetch(url):
+HEADER_COLS = [("Date", "h_date"), ("Last-Modified", "h_last_modified"),
+               ("ETag", "h_etag"), ("Age", "h_age"), ("Cache-Control", "h_cache_control"),
+               ("Expires", "h_expires")]
+CACHE_HINTS = ("X-Cache", "CF-Cache-Status", "Via", "X-Proxy-Cache", "X-Cache-Status")
+
+
+def pick_headers(h):
+    out = {col: h.get(name, "") for name, col in HEADER_COLS}
+    out["h_cache"] = "; ".join(f"{k}={h[k]}" for k in CACHE_HINTS if k in h)
+    return out
+
+
+def fetch(url, extra_headers=None):
+    """Devolve (conteúdo, código HTTP, cabeçalhos relevantes, início do pedido)."""
     last = None
+    headers = {"User-Agent": C.USER_AGENT, "Accept-Encoding": "gzip", **(extra_headers or {})}
     for attempt in range(C.HTTP_RETRIES):
+        start = datetime.now(timezone.utc)
         try:
-            r = requests.get(url, timeout=C.HTTP_TIMEOUT,
-                             headers={"User-Agent": C.USER_AGENT, "Accept-Encoding": "gzip"})
-            r.raise_for_status()
-            return r.content, r.status_code
+            r = requests.get(url, timeout=C.HTTP_TIMEOUT, headers=headers)
+            if r.status_code != 304:
+                r.raise_for_status()
+            return r.content, r.status_code, pick_headers(r.headers), start
         except Exception as e:  # noqa: BLE001
             last = e
             time.sleep(5 * (attempt + 1) ** 2)
     raise RuntimeError(f"{url}: {last}")
+
+
+def parse_ts(s):
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+
+def iso_ms(dt):
+    return dt.isoformat(timespec="milliseconds").replace("+00:00", "Z") if dt else ""
 
 
 class FeedError(Exception):
@@ -75,17 +103,26 @@ def save_debug(raw, err):
         f"--- INÍCIO ---\n{head}\n--- FIM ---\n{tail}\n", encoding="utf-8")
 
 
-def fetch_parse_status(attempts=2, wait_s=20):
-    """Descarrega e lê o feed; repete se a resposta vier inválida (ex.: truncada)."""
+def fetch_parse_status(cond=None, attempts=2, wait_s=20):
+    """Descarrega e lê o feed; repete se a resposta vier inválida (ex.: truncada).
+
+    Devolve um dicionário com raw, http, hdr, start, rows, excerpt, pub, retries.
+    Com resposta 304 (sem alterações), rows fica None.
+    """
     last = None
     for i in range(attempts):
         try:
-            raw, http = fetch(C.STATUS_URL)
+            raw, http, hdr, start = fetch(C.STATUS_URL, cond)
         except Exception as e:  # noqa: BLE001
             raise FeedError(f"download falhou: {e}") from e
+        res = {"raw": raw, "http": http, "hdr": hdr, "start": start, "retries": i,
+               "rows": None, "excerpt": None, "pub": None}
+        if http == 304:
+            return res
         try:
-            rows, excerpt = parse_status(io.BytesIO(raw))
-            return raw, http, rows, excerpt, i
+            rows, excerpt, pub = parse_status(io.BytesIO(raw))
+            res.update(rows=rows, excerpt=excerpt, pub=parse_ts(pub))
+            return res
         except Exception as e:  # noqa: BLE001 — XML inválido ou truncado
             last = f"XML inválido ({len(raw)/1e6:.1f} MB): {type(e).__name__}: {e}"
             save_debug(raw, last)
@@ -107,8 +144,21 @@ def save_json(path, obj):
 
 
 def append_gz_csv(path, header, rows):
-    """Acrescenta a um CSV gzip (membros gzip concatenados são válidos)."""
+    """Acrescenta a um CSV gzip (membros gzip concatenados são válidos).
+
+    Se o ficheiro existir com outro cabeçalho (mudança de versão do coletor),
+    é renomeado para <nome>.vN.csv.gz e começa-se um ficheiro novo.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        with gzip.open(path, "rt", encoding="utf-8", newline="") as f:
+            old_header = next(csv.reader(f), None)
+        if old_header != list(header):
+            stem = path.name[:-len(".csv.gz")]
+            n = 1
+            while (path.parent / f"{stem}.v{n}.csv.gz").exists():
+                n += 1
+            path.rename(path.parent / f"{stem}.v{n}.csv.gz")
     new = not path.exists()
     with gzip.open(path, "at", encoding="utf-8", newline="") as f:
         w = csv.writer(f)
@@ -133,12 +183,20 @@ def save_last_status(d):
         w.writerows(sorted(d.items()))
 
 
+SAMPLE_COLS = ["ts_utc", "ok", "http", "version", "pub_utc", "fetch_utc", "age_s",
+               "n_points", "n_events", "bytes", "secs",
+               "h_date", "h_last_modified", "h_etag", "h_age", "h_cache_control",
+               "h_expires", "h_cache", "err"]
+
+
 def record_sample(now, **kw):
-    row = {"ts_utc": iso(now), "ok": 0, "http": "", "n_points": 0, "n_events": 0,
-           "bytes": 0, "secs": "", "err": ""}
-    row.update(kw)
+    """Uma linha por run. version: nova | repetida | antiga | 304 | sem_pub | falha."""
+    row = {c: "" for c in SAMPLE_COLS}
+    row.update({"ts_utc": iso(now), "ok": 0, "n_points": 0, "n_events": 0, "bytes": 0,
+                "version": "falha"})
+    row.update({k: v for k, v in kw.items() if k in row})
     append_gz_csv(C.STATE_DIR / "samples" / f"{lisbon_date(now)}.csv.gz",
-                  list(row.keys()), [list(row.values())])
+                  SAMPLE_COLS, [[row[c] for c in SAMPLE_COLS]])
 
 
 # ---------------------------------------------------------------- estático
@@ -150,7 +208,7 @@ def refresh_static(now):
         if age_h < C.STATIC_REFRESH_H:
             return None
     try:
-        raw, _ = fetch(C.INFRA_URL)
+        raw, _, _, _ = fetch(C.INFRA_URL)
     except Exception as e:  # noqa: BLE001
         say(f"> ⚠️ Inventário estático não atualizado: {e}")
         return None
@@ -235,7 +293,8 @@ def main():
         if (now - prev).total_seconds() < C.MIN_INTERVAL_S:
             print(f"Recolha anterior há {(now - prev).total_seconds():.0f}s — ignorada.")
             return 0
-    save_json(C.STATE_DIR / "last_run.json", {"ts_utc": iso(now)})
+    last["ts_utc"] = iso(now)
+    save_json(C.STATE_DIR / "last_run.json", last)
 
     say(f"## Recolha {now.astimezone(C.TZ):%Y-%m-%d %H:%M} (Lisboa)")
 
@@ -244,7 +303,7 @@ def main():
         (C.STATE_DIR / old).unlink(missing_ok=True)
 
     try:
-        return process(now, t0)
+        return process(now, t0, last)
     except Exception as e:  # noqa: BLE001 — erro inesperado: regista e falha o run
         record_sample(now, err=f"erro interno: {type(e).__name__}: {e}"[:300],
                       secs=round(time.time() - t0, 1))
@@ -253,15 +312,58 @@ def main():
         raise
 
 
-def process(now, t0):
+def lisbon_hms(dt):
+    return dt.astimezone(C.TZ).strftime("%H:%M:%S") if dt else "—"
+
+
+def process(now, t0, last):
+    # Pedido condicional: se o servidor suportar, devolve 304 sem descarregar 36 MB.
+    cond = {}
+    if C.USE_CONDITIONAL and last.get("etag"):
+        cond["If-None-Match"] = last["etag"]
+    if C.USE_CONDITIONAL and last.get("last_modified"):
+        cond["If-Modified-Since"] = last["last_modified"]
+
     try:
-        raw, http, rows, excerpt, retries = fetch_parse_status()
+        res = fetch_parse_status(cond)
     except FeedError as e:
         record_sample(now, err=str(e)[:300], secs=round(time.time() - t0, 1))
         say(f"> ❌ Feed dinâmico indisponível ou inválido: {e}")
         return 0
-    if retries:
-        say(f"> ⚠️ Primeira resposta inválida; recuperado à tentativa {retries + 1}.")
+    if res["retries"]:
+        say(f"> ⚠️ Primeira resposta inválida; recuperado à tentativa {res['retries'] + 1}.")
+
+    raw, http, hdr, start, pub = res["raw"], res["http"], res["hdr"], res["start"], res["pub"]
+    last_pub = parse_ts(last.get("pub_utc"))
+    age = round((start - pub).total_seconds(), 1) if pub else ""
+    base = dict(http=http, fetch_utc=iso_ms(start), pub_utc=iso_ms(pub), age_s=age,
+                bytes=len(raw), **hdr)
+
+    # Classificação da versão recebida.
+    if http == 304:
+        version = "304"
+    elif pub is None:
+        version = "sem_pub"
+    elif last_pub and pub == last_pub:
+        version = "repetida"
+    elif last_pub and pub < last_pub:
+        version = "antiga"
+    else:
+        version = "nova"
+
+    say(f"- Versão do feed: **{version}** · gerada às {lisbon_hms(pub)} · "
+        f"pedida às {lisbon_hms(start)} · idade no download: {age if age != '' else '—'} s")
+    cache_bits = [f"{k[2:]}={v}" for k, v in hdr.items() if v and k != "h_date"]
+    say(f"- Cabeçalhos: {md(' · '.join(cache_bits)) or '(sem cabeçalhos de cache)'}")
+
+    if version in ("304", "repetida", "antiga"):
+        # Mesma informação já registada: não é uma observação nova.
+        record_sample(now, ok=1, version=version, n_points=len({r[0] for r in res["rows"] or []}),
+                      secs=round(time.time() - t0, 1), **base)
+        say("- Sem observação nova (versão já registada).")
+        return 0
+
+    rows, excerpt = res["rows"], res["excerpt"]
     prev = load_last_status()
     cur = {}
     dups = {}
@@ -272,33 +374,39 @@ def process(now, t0):
     dup = len(dups)
 
     if not cur or (prev and len(cur) < C.MIN_FEED_RATIO * sum(v != C.ABSENT for v in prev.values())):
-        record_sample(now, http=http, bytes=len(raw), n_points=len(cur),
-                      err="feed vazio ou parcial", secs=round(time.time() - t0, 1))
+        record_sample(now, n_points=len(cur), err="feed vazio ou parcial",
+                      secs=round(time.time() - t0, 1), **base)
         say(f"> ❌ Feed vazio ou parcial ({len(cur)} pontos). Tratado como falha (sem dados).")
         if not cur:
             say("```xml\n" + raw[:2500].decode("utf-8", "replace") + "\n```")
         return 0
 
-    events = [(iso(now), pid, st) for pid, st in cur.items() if prev.get(pid) != st]
-    events += [(iso(now), pid, C.ABSENT) for pid, st in prev.items()
+    # Hora do evento = hora de geração do feed (publicationTime); se faltar, hora do pedido.
+    ev_dt = pub or start
+    ev_ts = iso(ev_dt)
+    events = [(ev_ts, pid, st) for pid, st in cur.items() if prev.get(pid) != st]
+    events += [(ev_ts, pid, C.ABSENT) for pid, st in prev.items()
                if pid not in cur and st != C.ABSENT]
     new_last = {pid: C.ABSENT for pid in prev}
     new_last.update(cur)
 
-    day = lisbon_date(now)
     if events:
-        append_gz_csv(C.STATE_DIR / "events" / f"{day}.csv.gz",
+        append_gz_csv(C.STATE_DIR / "events" / f"{lisbon_date(ev_dt)}.csv.gz",
                       ["ts_utc", "point_id", "status"], events)
     save_last_status(new_last)
 
+    day = lisbon_date(now)
     raw_day = C.STATE_DIR / "raw" / f"{day}.status.xml.gz"
-    if day <= C.RAW_DAILY_UNTIL and not raw_day.exists():  # 1 cópia bruta por dia, para reprocessamento
+    if day <= C.RAW_DAILY_UNTIL and not raw_day.exists():  # 1 cópia bruta por dia
         raw_day.parent.mkdir(parents=True, exist_ok=True)
         with gzip.open(raw_day, "wb") as f:
             f.write(raw)
 
-    record_sample(now, ok=1, http=http, bytes=len(raw), n_points=len(cur),
-                  n_events=len(events), secs=round(time.time() - t0, 1))
+    record_sample(now, ok=1, version=version, n_points=len(cur), n_events=len(events),
+                  secs=round(time.time() - t0, 1), **base)
+    last.update(pub_utc=iso_ms(pub), etag=hdr.get("h_etag", ""),
+                last_modified=hdr.get("h_last_modified", ""))
+    save_json(C.STATE_DIR / "last_run.json", last)
 
     say(f"- Pontos no feed: **{len(cur)}** · eventos (mudanças): **{len(events)}** · "
         f"duplicados: {dup} · {len(raw)/1e6:.1f} MB · {time.time()-t0:.1f}s")

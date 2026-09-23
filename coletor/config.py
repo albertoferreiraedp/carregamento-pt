@@ -29,6 +29,10 @@ MIN_FEED_RATIO = 0.5
 # Estado registado quando uma tomada deixa de constar do feed dinâmico.
 ABSENT = "__AUSENTE__"
 
+# Pedidos condicionais (If-None-Match / If-Modified-Since). Desligados durante a
+# medição: só serão ativados se os cabeçalhos do servidor se provarem fiáveis.
+USE_CONDITIONAL = False
+
 # Cópia bruta diária do XML (para reprocessamento) só durante o piloto.
 RAW_DAILY_UNTIL = "2026-10-07"
 
