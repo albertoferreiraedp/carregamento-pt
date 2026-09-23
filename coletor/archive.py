@@ -17,7 +17,7 @@ import pandas as pd
 
 from . import config as C
 
-KINDS = {"events": "csv", "samples": "csv", "static_events": "csv", "raw": "copy"}
+KINDS = {"events": "csv", "samples": "csv", "static_events": "csv", "tariffs": "csv", "raw": "copy"}
 MANIFEST = C.STATE_DIR / ".archive_manifest.json"
 MANIFEST_HASH = C.STATE_DIR / ".static_hash_pending.txt"
 
@@ -60,7 +60,7 @@ def export():
                     for col in ("ok", "http", "n_points", "n_events", "bytes", "present"):
                         if col in df:
                             df[col] = pd.to_numeric(df[col], errors="coerce").astype("Int64")
-                    for col in ("age_s", "secs"):
+                    for col in ("age_s", "secs", "eur_sessao", "eur_kwh", "eur_min"):
                         if col in df:
                             df[col] = pd.to_numeric(df[col], errors="coerce")
                     # 2026-09-24.csv.gz -> 2026-09-24.parquet ; 2026-09-24.v1.csv.gz -> 2026-09-24.v1.parquet

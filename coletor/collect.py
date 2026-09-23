@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 import requests
 
 from . import config as C
-from .parse import INFRA_FIELDS, parse_infra, parse_status
+from .parse import INFRA_FIELDS, parse_infra, parse_status, tariff_components
 
 SUMMARY = []
 
@@ -165,6 +165,42 @@ def append_gz_csv(path, header, rows):
         if new:
             w.writerow(header)
         w.writerows(rows)
+
+
+def load_last_tariffs():
+    p = C.STATE_DIR / "last_tariffs.csv.gz"
+    if not p.exists():
+        return {}
+    with gzip.open(p, "rt", encoding="utf-8", newline="") as f:
+        return {r["point_id"]: r["tarifario"] for r in csv.DictReader(f)}
+
+
+def save_last_tariffs(d):
+    with gzip.open(C.STATE_DIR / "last_tariffs.csv.gz", "wt", encoding="utf-8", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["point_id", "tarifario"])
+        w.writerows(sorted(d.items()))
+
+
+TARIFF_COLS = ["ts_utc", "point_id", "eur_sessao", "eur_kwh", "eur_min", "tarifario"]
+
+
+def record_tariffs(rows, ev_dt):
+    """Regista o tarifário de cada ponto quando muda (1.ª execução = tarifário de base)."""
+    prev = load_last_tariffs()
+    cur = {pid: tar for pid, _st, _lu, tar in rows}
+    ts = iso(ev_dt)
+    changes = []
+    for pid, tar in cur.items():
+        if prev.get(pid) != tar:
+            fee, kwh, mins = tariff_components(tar, ts)
+            changes.append((ts, pid, fee, kwh, mins, tar))
+    if changes:
+        append_gz_csv(C.STATE_DIR / "tariffs" / f"{lisbon_date(ev_dt)}.csv.gz", TARIFF_COLS, changes)
+    merged = dict(prev)
+    merged.update(cur)
+    save_last_tariffs(merged)
+    return len(changes), bool(prev)
 
 
 def load_last_status():
@@ -367,7 +403,7 @@ def process(now, t0, last):
     prev = load_last_status()
     cur = {}
     dups = {}
-    for pid, st, _lu in rows:
+    for pid, st, _lu, _tar in rows:
         if pid in cur:
             dups.setdefault(pid, [cur[pid]]).append(st)
         cur[pid] = st
@@ -394,6 +430,7 @@ def process(now, t0, last):
         append_gz_csv(C.STATE_DIR / "events" / f"{lisbon_date(ev_dt)}.csv.gz",
                       ["ts_utc", "point_id", "status"], events)
     save_last_status(new_last)
+    n_tar, had_tar = record_tariffs(rows, ev_dt)
 
     day = lisbon_date(now)
     raw_day = C.STATE_DIR / "raw" / f"{day}.status.xml.gz"
@@ -417,6 +454,7 @@ def process(now, t0, last):
         for k, v in list(dups.items())[:15]:
             say(f"- `{k}`: {', '.join(v)}")
         say("</details>")
+    say(f"- Tarifários: **{n_tar}** {'alterações registadas' if had_tar else 'pontos no registo de base'}")
     say("\n### Estados no feed")
     say("| Estado | Pontos |")
     say("|---|---|")

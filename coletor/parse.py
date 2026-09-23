@@ -78,9 +78,43 @@ def parse_status(src):
             st_el = _desc(el, "status")
         lu = _text(_child(el, "lastUpdated"))
         if pid:
-            rows.append((pid, _text(st_el) or "", lu))
+            rows.append((pid, _text(st_el) or "", lu, tariff_signature(el)))
         el.clear(keep_tail=True)
     return rows, excerpt, pub
+
+
+def tariff_signature(el):
+    """Tarifário OPC do ponto como texto estável: "política;valor;início;fim|..." (ordenado).
+
+    Políticas observadas: pricePerDeliveryUnit (€/kWh), pricePerChargingTime (€/min),
+    flatRate (€/sessão).
+    """
+    parts = []
+    for mix in el:
+        if _ln(mix) != "electricEnergyMixOverride":
+            continue
+        pol = _text(_desc(mix, "pricingPolicy")) or ""
+        fee = _text(_desc(mix, "minimumDeliveryFee")) or ""
+        start = _text(_desc(mix, "overallStartTime")) or ""
+        end = _text(_desc(mix, "overallEndTime")) or ""
+        parts.append(f"{pol};{fee};{start};{end}")
+    return "|".join(sorted(parts))
+
+
+def tariff_components(sig, at_iso):
+    """(€/sessão, €/kWh, €/min) em vigor no instante at_iso (texto ISO UTC)."""
+    out = {"flatRate": 0.0, "pricePerDeliveryUnit": 0.0, "pricePerChargingTime": 0.0}
+    for part in filter(None, (sig or "").split("|")):
+        pol, fee, start, end = (part.split(";") + ["", "", "", ""])[:4]
+        if start and start[:19] > at_iso[:19]:
+            continue
+        if end and end[:19] <= at_iso[:19]:
+            continue
+        try:
+            out[pol] = float(fee)
+        except (KeyError, ValueError):
+            pass
+    return out["flatRate"], out["pricePerDeliveryUnit"], out["pricePerChargingTime"]
 
 
 INFRA_FIELDS = [
