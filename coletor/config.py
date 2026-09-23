@@ -29,6 +29,9 @@ MIN_FEED_RATIO = 0.5
 # Estado registado quando uma tomada deixa de constar do feed dinâmico.
 ABSENT = "__AUSENTE__"
 
+# Cópia bruta diária do XML (para reprocessamento) só durante o piloto.
+RAW_DAILY_UNTIL = "2026-10-07"
+
 USER_AGENT = "disponibilidade-carregamento-pt/1.0 (projeto independente; fonte NAP/MOBI.E)"
 HTTP_TIMEOUT = (15, 120)
 HTTP_RETRIES = 3

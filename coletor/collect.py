@@ -33,6 +33,10 @@ def write_summary():
             f.write("\n".join(SUMMARY) + "\n")
 
 
+def md(x):
+    return str(x).replace("|", "\\|")
+
+
 def iso(dt):
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -140,9 +144,24 @@ def refresh_static(now):
         w.writerows(rows)
     save_json(meta_p, {"ts_utc": iso(now), "n_points": len(rows),
                        "n_sites": len({r["site_id"] for r in rows})})
-    with gzip.open(C.STATE_DIR / "latest_infra.xml.gz", "wb") as f:
-        f.write(raw)
     return rows, excerpt
+
+
+def static_diagnostics(rows):
+    n = len(rows)
+    pw = sorted(r["max_power_raw"] for r in rows if r["max_power_raw"] is not None)
+    coords = sum(r["lat"] is not None and r["lon"] is not None for r in rows)
+    say("\n### Diagnóstico do inventário")
+    say(f"- Com coordenadas: {coords/n:.1%} · com potência: {len(pw)/n:.1%}")
+    if pw:
+        q = lambda f: pw[min(len(pw) - 1, int(f * len(pw)))]
+        say(f"- Potência bruta — mín {pw[0]:g} · p25 {q(.25):g} · mediana {q(.5):g} · "
+            f"p75 {q(.75):g} · máx {pw[-1]:g}")
+    for field, label in (("connector_types", "Tipos de conector"),
+                         ("charging_modes", "Modos de carregamento"),
+                         ("hours_type", "Tipo de horário")):
+        top = Counter(r[field] or "(vazio)" for r in rows).most_common(8)
+        say(f"- {label}: " + " · ".join(f"`{md(k)}` {v}" for k, v in top))
 
 
 def operators_report(rows):
@@ -165,7 +184,7 @@ def operators_report(rows):
     say("| # | Operador | Código | Locais | Pontos | % |")
     say("|---|---|---|---|---|---|")
     for i, (k, n) in enumerate(pts.most_common(25), 1):
-        say(f"| {i} | {names[k]} | {k} | {len(sites[k])} | {n} | {100*n/total:.1f}% |")
+        say(f"| {i} | {md(names[k])} | {md(k)} | {len(sites[k])} | {n} | {100*n/total:.1f}% |")
 
 
 # ---------------------------------------------------------------- principal
@@ -195,10 +214,12 @@ def main():
     rows, excerpt = parse_status(io.BytesIO(raw))
     prev = load_last_status()
     cur = {}
-    dup = 0
+    dups = {}
     for pid, st, _lu in rows:
-        dup += pid in cur
+        if pid in cur:
+            dups.setdefault(pid, [cur[pid]]).append(st)
         cur[pid] = st
+    dup = len(dups)
 
     if not cur or (prev and len(cur) < C.MIN_FEED_RATIO * sum(v != C.ABSENT for v in prev.values())):
         record_sample(now, http=http, bytes=len(raw), n_points=len(cur),
@@ -220,10 +241,8 @@ def main():
                       ["ts_utc", "point_id", "status"], events)
     save_last_status(new_last)
 
-    with gzip.open(C.STATE_DIR / "latest_status.xml.gz", "wb") as f:
-        f.write(raw)
     raw_day = C.STATE_DIR / "raw" / f"{day}.status.xml.gz"
-    if not raw_day.exists():  # 1 cópia bruta por dia, para reprocessamento
+    if day <= C.RAW_DAILY_UNTIL and not raw_day.exists():  # 1 cópia bruta por dia, para reprocessamento
         raw_day.parent.mkdir(parents=True, exist_ok=True)
         with gzip.open(raw_day, "wb") as f:
             f.write(raw)
@@ -233,6 +252,13 @@ def main():
 
     say(f"- Pontos no feed: **{len(cur)}** · eventos (mudanças): **{len(events)}** · "
         f"duplicados: {dup} · {len(raw)/1e6:.1f} MB · {time.time()-t0:.1f}s")
+    if dups:
+        conflict = {k: v for k, v in dups.items() if len(set(v)) > 1}
+        say(f"- IDs repetidos: {len(dups)} · com estados diferentes: {len(conflict)}")
+        say("\n<details><summary>Amostra de IDs repetidos</summary>\n")
+        for k, v in list(dups.items())[:15]:
+            say(f"- `{k}`: {', '.join(v)}")
+        say("</details>")
     say("\n### Estados no feed")
     say("| Estado | Pontos |")
     say("|---|---|")
@@ -247,6 +273,7 @@ def main():
         in_dyn = sum(pid in cur for pid in sids) / len(sids)
         say(f"\n- Inventário: {len(srows)} pontos · dinâmico∩estático: "
             f"{in_static:.1%} dos pontos dinâmicos, {in_dyn:.1%} dos estáticos")
+        static_diagnostics(srows)
         operators_report(srows)
         if not prev:  # primeira execução: mostrar estrutura para validação
             say("\n<details><summary>Excerto XML — estado</summary>\n\n```xml\n"
