@@ -1,0 +1,78 @@
+name: Recolha
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/5 * * * *"
+
+concurrency:
+  group: recolha
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  recolha:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      REPO_URL: https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+      STATE_DIR: ${{ github.workspace }}/state
+      DATA_DIR: ${{ github.workspace }}/data
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -q -r requirements.txt
+
+      - name: Configurar git
+        run: |
+          git config --global user.name "coletor"
+          git config --global user.email "coletor@users.noreply.github.com"
+
+      - name: Obter estado (branch state)
+        run: |
+          if git ls-remote --exit-code --heads "$REPO_URL" state >/dev/null; then
+            git clone -q --depth 1 --branch state "$REPO_URL" state
+          else
+            mkdir state && git -C state init -q -b state && git -C state remote add origin "$REPO_URL"
+          fi
+
+      - name: Recolher
+        run: python -m coletor.collect
+
+      - name: Dias por arquivar
+        id: arq
+        run: python -m coletor.archive pending
+
+      - name: Exportar para branch data
+        if: steps.arq.outputs.pending != '0'
+        run: |
+          if git ls-remote --exit-code --heads "$REPO_URL" data >/dev/null; then
+            git clone -q --depth 1 --filter=blob:none --sparse --branch data "$REPO_URL" data
+          else
+            mkdir data && git -C data init -q -b data && git -C data remote add origin "$REPO_URL"
+          fi
+          python -m coletor.archive export
+          cd data
+          git add --sparse -A .
+          git commit -qm "Arquivo $(TZ=Europe/Lisbon date +%F)" || echo "Nada a arquivar"
+          git push -q origin HEAD:data
+
+      - name: Limpar estado arquivado
+        if: steps.arq.outputs.pending != '0'
+        run: python -m coletor.archive cleanup
+
+      - name: Guardar estado
+        if: always()
+        run: |
+          cd state
+          git checkout -q --orphan snap
+          git add -A
+          git commit -qm "estado $(date -u +%FT%TZ)"
+          git push -qf origin snap:state
