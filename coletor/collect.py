@@ -10,6 +10,7 @@ import json
 import os
 import sys
 import time
+import traceback
 from collections import Counter
 from datetime import datetime, timezone
 
@@ -57,6 +58,40 @@ def fetch(url):
             last = e
             time.sleep(5 * (attempt + 1) ** 2)
     raise RuntimeError(f"{url}: {last}")
+
+
+class FeedError(Exception):
+    pass
+
+
+def save_debug(raw, err):
+    """Guarda início e fim de uma resposta inválida, para diagnóstico."""
+    d = C.STATE_DIR / "debug"
+    d.mkdir(parents=True, exist_ok=True)
+    head = raw[:1500].decode("utf-8", "replace")
+    tail = raw[-1500:].decode("utf-8", "replace")
+    (d / "ultima_resposta_invalida.txt").write_text(
+        f"{datetime.now(timezone.utc):%Y-%m-%dT%H:%M:%SZ}\n{err}\nbytes={len(raw)}\n"
+        f"--- INÍCIO ---\n{head}\n--- FIM ---\n{tail}\n", encoding="utf-8")
+
+
+def fetch_parse_status(attempts=2, wait_s=20):
+    """Descarrega e lê o feed; repete se a resposta vier inválida (ex.: truncada)."""
+    last = None
+    for i in range(attempts):
+        try:
+            raw, http = fetch(C.STATUS_URL)
+        except Exception as e:  # noqa: BLE001
+            raise FeedError(f"download falhou: {e}") from e
+        try:
+            rows, excerpt = parse_status(io.BytesIO(raw))
+            return raw, http, rows, excerpt, i
+        except Exception as e:  # noqa: BLE001 — XML inválido ou truncado
+            last = f"XML inválido ({len(raw)/1e6:.1f} MB): {type(e).__name__}: {e}"
+            save_debug(raw, last)
+            if i < attempts - 1:
+                time.sleep(wait_s)
+    raise FeedError(last)
 
 
 def load_json(path, default=None):
@@ -204,14 +239,29 @@ def main():
 
     say(f"## Recolha {now.astimezone(C.TZ):%Y-%m-%d %H:%M} (Lisboa)")
 
-    try:
-        raw, http = fetch(C.STATUS_URL)
-    except Exception as e:  # noqa: BLE001
-        record_sample(now, err=str(e)[:300], secs=round(time.time() - t0, 1))
-        say(f"> ❌ Feed dinâmico indisponível: {e}")
-        return 0
+    # Ficheiros de versões anteriores que já não são usados.
+    for old in ("latest_status.xml.gz", "latest_infra.xml.gz"):
+        (C.STATE_DIR / old).unlink(missing_ok=True)
 
-    rows, excerpt = parse_status(io.BytesIO(raw))
+    try:
+        return process(now, t0)
+    except Exception as e:  # noqa: BLE001 — erro inesperado: regista e falha o run
+        record_sample(now, err=f"erro interno: {type(e).__name__}: {e}"[:300],
+                      secs=round(time.time() - t0, 1))
+        say(f"> ❌ Erro interno: `{type(e).__name__}: {e}`")
+        say("```\n" + traceback.format_exc()[-3000:] + "\n```")
+        raise
+
+
+def process(now, t0):
+    try:
+        raw, http, rows, excerpt, retries = fetch_parse_status()
+    except FeedError as e:
+        record_sample(now, err=str(e)[:300], secs=round(time.time() - t0, 1))
+        say(f"> ❌ Feed dinâmico indisponível ou inválido: {e}")
+        return 0
+    if retries:
+        say(f"> ⚠️ Primeira resposta inválida; recuperado à tentativa {retries + 1}.")
     prev = load_last_status()
     cur = {}
     dups = {}
