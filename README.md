@@ -12,11 +12,13 @@ Este repositório recolhe, a cada 5 minutos, o estado de todas as tomadas públi
 | `coletor/archive.py` | Depois das 00:10 (Lisboa), converte o dia anterior para Parquet e move-o para o branch `data`. |
 | `.github/workflows/recolha.yml` | Corre o coletor. É disparado pelo cron-job.org, com o schedule do GitHub como redundância. |
 
-Branches:
+Dados:
 
-- **`main`:** código.
-- **`state`:** estado corrente e dia em curso. É reescrito a cada recolha, sem histórico, para não crescer.
-- **`data`:** arquivo diário em Parquet, organizado por ano (`2026/events`, `2026/samples`, `2026/static`, ...).
+- Este repositório contém **apenas o código** da recolha.
+- O estado corrente e o arquivo diário (Parquet) são gravados num **repositório privado**, indicado pela variável `DATA_REPO` e acedido com o segredo `DATA_TOKEN`.
+- O Summary de cada run mostra apenas indicadores técnicos.
+
+Fonte dos dados: Ponto de Acesso Nacional (NAP Portugal, IMT) — dados da rede MOBI.E, livre acesso.
 
 ## Instalação (uma vez)
 
