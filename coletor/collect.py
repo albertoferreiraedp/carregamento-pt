@@ -12,7 +12,7 @@ import sys
 import time
 import traceback
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import requests
 
@@ -219,7 +219,7 @@ def save_last_status(d):
         w.writerows(sorted(d.items()))
 
 
-SAMPLE_COLS = ["ts_utc", "ok", "http", "version", "pub_utc", "fetch_utc", "age_s",
+SAMPLE_COLS = ["ts_utc", "ok", "http", "version", "pub_utc", "fetch_utc", "age_s", "wait_s",
                "n_points", "n_events", "bytes", "secs",
                "h_date", "h_last_modified", "h_etag", "h_age", "h_cache_control",
                "h_expires", "h_cache", "err"]
@@ -357,8 +357,6 @@ def process(now, t0, last):
     cond = {}
     if C.USE_CONDITIONAL and last.get("etag"):
         cond["If-None-Match"] = last["etag"]
-    if C.USE_CONDITIONAL and last.get("last_modified"):
-        cond["If-Modified-Since"] = last["last_modified"]
 
     try:
         res = fetch_parse_status(cond)
@@ -369,15 +367,36 @@ def process(now, t0, last):
     if res["retries"]:
         say(f"> ⚠️ Primeira resposta inválida; recuperado à tentativa {res['retries'] + 1}.")
 
-    raw, http, hdr, start, pub = res["raw"], res["http"], res["hdr"], res["start"], res["pub"]
     last_pub = parse_ts(last.get("pub_utc"))
+
+    # Versão já registada (304 ou mesmo publicationTime): esperar pela próxima publicação e tentar uma vez.
+    wait_s = 0
+    if last_pub and (res["http"] == 304 or (res["pub"] is not None and res["pub"] <= last_pub)):
+        target = last_pub + timedelta(seconds=C.PUBLISH_EVERY_S + C.READY_MARGIN_S)
+        while target <= datetime.now(timezone.utc):          # se já passou mais de um ciclo
+            target += timedelta(seconds=C.PUBLISH_EVERY_S)
+        wait = (target - datetime.now(timezone.utc)).total_seconds()
+        if wait <= C.MAX_WAIT_S:
+            say(f"- Versão já registada; a aguardar {wait:.0f} s pela publicação seguinte.")
+            time.sleep(max(0, wait))
+            wait_s = round(wait)
+            try:
+                res2 = fetch_parse_status(cond)
+                if res2["http"] != 304 and res2["pub"] is not None and res2["pub"] > last_pub:
+                    res = res2
+                    say("- Nova versão obtida após a espera.")
+            except FeedError as e:
+                say(f"> ⚠️ Nova tentativa falhou: {e}")
+
+    raw, http, hdr, start, pub = res["raw"], res["http"], res["hdr"], res["start"], res["pub"]
     age = round((start - pub).total_seconds(), 1) if pub else ""
     base = dict(http=http, fetch_utc=iso_ms(start), pub_utc=iso_ms(pub), age_s=age,
-                bytes=len(raw), **hdr)
+                bytes=len(raw), wait_s=wait_s, **hdr)
 
     # Classificação da versão recebida.
     if http == 304:
         version = "304"
+        pub = last_pub
     elif pub is None:
         version = "sem_pub"
     elif last_pub and pub == last_pub:
@@ -453,7 +472,7 @@ def process(now, t0, last):
         say("\n<details><summary>Amostra de IDs repetidos</summary>\n")
         for k, v in list(dups.items())[:15]:
             say(f"- `{k}`: {', '.join(v)}")
-        say("</details>")
+        say("</details>\n")
     say(f"- Tarifários: **{n_tar}** {'alterações registadas' if had_tar else 'pontos no registo de base'}")
     say("\n### Estados no feed")
     say("| Estado | Pontos |")

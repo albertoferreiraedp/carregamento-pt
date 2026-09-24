@@ -29,9 +29,16 @@ MIN_FEED_RATIO = 0.5
 # Estado registado quando uma tomada deixa de constar do feed dinâmico.
 ABSENT = "__AUSENTE__"
 
-# Pedidos condicionais (If-None-Match / If-Modified-Since). Desligados durante a
-# medição: só serão ativados se os cabeçalhos do servidor se provarem fiáveis.
-USE_CONDITIONAL = False
+# Pedidos condicionais com ETag (If-None-Match). Medição de 23–24/09: 1 ETag por versão
+# do feed em 164 de 164 casos, por isso é seguro evitar descarregar versões repetidas.
+USE_CONDITIONAL = True
+
+# Ciclo de publicação medido: o feed é gerado a cada 5 min (~4 s após cada múltiplo de 5 min)
+# e só fica completo para download ~45–70 s depois. Se um run receber a versão já registada,
+# espera pela seguinte (+ margem) e tenta uma vez mais.
+PUBLISH_EVERY_S = 300
+READY_MARGIN_S = 90
+MAX_WAIT_S = 180
 
 # Cópia bruta diária do XML (para reprocessamento) só durante o piloto.
 RAW_DAILY_UNTIL = "2026-10-07"
