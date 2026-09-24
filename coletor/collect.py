@@ -312,6 +312,9 @@ def operators_report(rows):
         w.writerow(["rank", "operator_id", "operator_name", "locais", "pontos", "pct_pontos"])
         for i, (k, n) in enumerate(pts.most_common(), 1):
             w.writerow([i, k, names[k], len(sites[k]), n, round(100 * n / total, 2)])
+    if C.PUBLIC_SUMMARY:
+        say(f"- Inventário: {len(pts)} operadores (ranking guardado no repositório de dados)")
+        return
     say("\n### Ranking de operadores (top 25, por nº de pontos)")
     say("| # | Operador | Código | Locais | Pontos | % |")
     say("|---|---|---|---|---|---|")
@@ -473,7 +476,7 @@ def process(now, t0, last):
 
     say(f"- Pontos no feed: **{len(cur)}** · eventos (mudanças): **{len(events)}** · "
         f"IDs partilhados entre locais: {n_coll} (chave local|ID) · duplicados: {dup} · {len(raw)/1e6:.1f} MB · {time.time()-t0:.1f}s")
-    if dups:
+    if dups and not C.PUBLIC_SUMMARY:
         conflict = {k: v for k, v in dups.items() if len(set(v)) > 1}
         say(f"- IDs repetidos: {len(dups)} · com estados diferentes: {len(conflict)}")
         say("\n<details><summary>Amostra de IDs repetidos</summary>\n")
@@ -495,9 +498,10 @@ def process(now, t0, last):
         in_dyn = sum(pid in cur for pid in sids) / len(sids)
         say(f"\n- Inventário: {len(srows)} pontos · dinâmico∩estático: "
             f"{in_static:.1%} dos pontos dinâmicos, {in_dyn:.1%} dos estáticos")
-        static_diagnostics(srows)
+        if not C.PUBLIC_SUMMARY:
+            static_diagnostics(srows)
         operators_report(srows)
-        if not prev:  # primeira execução: mostrar estrutura para validação
+        if not prev and not C.PUBLIC_SUMMARY:  # primeira execução: mostrar estrutura para validação
             say("\n<details><summary>Excerto XML — estado</summary>\n\n```xml\n"
                 f"{excerpt}\n```\n</details>")
             say("\n<details><summary>Excerto XML — inventário</summary>\n\n```xml\n"

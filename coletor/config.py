@@ -43,6 +43,9 @@ MAX_WAIT_S = 180
 # Cópia bruta diária do XML (para reprocessamento) só durante o piloto.
 RAW_DAILY_UNTIL = "2026-10-07"
 
+# O Summary dos runs é público (repositório público): só mostra indicadores técnicos.
+PUBLIC_SUMMARY = os.environ.get("PUBLIC_SUMMARY", "1") == "1"
+
 USER_AGENT = "disponibilidade-carregamento-pt/1.0 (projeto independente; fonte NAP/MOBI.E)"
 HTTP_TIMEOUT = (15, 120)
 HTTP_RETRIES = 3
