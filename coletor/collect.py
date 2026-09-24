@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 import requests
 
 from . import config as C
-from .parse import INFRA_FIELDS, parse_infra, parse_status, tariff_components
+from .parse import INFRA_FIELDS, parse_infra, parse_status, tariff_components, unique_keys
 
 SUMMARY = []
 
@@ -286,6 +286,9 @@ def static_diagnostics(rows):
         q = lambda f: pw[min(len(pw) - 1, int(f * len(pw)))]
         say(f"- Potência bruta — mín {pw[0]:g} · p25 {q(.25):g} · mediana {q(.5):g} · "
             f"p75 {q(.75):g} · máx {pw[-1]:g}")
+    ex = next((r["hours_raw"] for r in rows if r.get("hours_raw")), None)
+    if ex:
+        say(f"- Exemplo de horário restrito: `{md(ex[:300])}`")
     for field, label in (("connector_types", "Tipos de conector"),
                          ("charging_modes", "Modos de carregamento"),
                          ("hours_type", "Tipo de horário")):
@@ -413,12 +416,16 @@ def process(now, t0, last):
 
     if version in ("304", "repetida", "antiga"):
         # Mesma informação já registada: não é uma observação nova.
-        record_sample(now, ok=1, version=version, n_points=len({r[0] for r in res["rows"] or []}),
+        record_sample(now, ok=1, version=version, n_points=len(set(unique_keys([(r[4], r[0]) for r in res["rows"] or []]))),
                       secs=round(time.time() - t0, 1), **base)
         say("- Sem observação nova (versão já registada).")
         return 0
 
     rows, excerpt = res["rows"], res["excerpt"]
+    # IDs repetidos entre locais diferentes (operadores com IDs simples): chave "local|ID"
+    keys = unique_keys([(r[4], r[0]) for r in rows])
+    n_coll = sum(1 for k in keys if "|" in k)
+    rows = [(k, r[1], r[2], r[3]) for k, r in zip(keys, rows)]
     prev = load_last_status()
     cur = {}
     dups = {}
@@ -465,7 +472,7 @@ def process(now, t0, last):
     save_json(C.STATE_DIR / "last_run.json", last)
 
     say(f"- Pontos no feed: **{len(cur)}** · eventos (mudanças): **{len(events)}** · "
-        f"duplicados: {dup} · {len(raw)/1e6:.1f} MB · {time.time()-t0:.1f}s")
+        f"IDs partilhados entre locais: {n_coll} (chave local|ID) · duplicados: {dup} · {len(raw)/1e6:.1f} MB · {time.time()-t0:.1f}s")
     if dups:
         conflict = {k: v for k, v in dups.items() if len(set(v)) > 1}
         say(f"- IDs repetidos: {len(dups)} · com estados diferentes: {len(conflict)}")

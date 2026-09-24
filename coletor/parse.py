@@ -61,11 +61,16 @@ def parse_status(src):
     Linhas: (point_id, status, last_updated). publication_time é o texto do
     primeiro elemento <publicationTime> (hora de geração do ficheiro).
     """
-    rows, excerpt, pub = [], None, None
+    rows, excerpt, pub, site = [], None, None, None
     for _, el in etree.iterparse(src, events=("end",), huge_tree=True):
         name = _ln(el)
         if pub is None and name == "publicationTime":
             pub = _text(el)
+            continue
+        if name == "reference":
+            par = el.getparent()
+            if par is not None and _ln(par) == "energyInfrastructureSiteStatus":
+                site = el.get("id")
             continue
         if name != "refillPointStatus":
             continue
@@ -78,7 +83,7 @@ def parse_status(src):
             st_el = _desc(el, "status")
         lu = _text(_child(el, "lastUpdated"))
         if pid:
-            rows.append((pid, _text(st_el) or "", lu, tariff_signature(el)))
+            rows.append((pid, _text(st_el) or "", lu, tariff_signature(el), site))
         el.clear(keep_tail=True)
     return rows, excerpt, pub
 
@@ -118,11 +123,27 @@ def tariff_components(sig, at_iso):
 
 
 INFRA_FIELDS = [
-    "point_id", "point_external_id", "site_id", "site_name",
+    "point_id", "point_id_raw", "point_external_id", "site_id", "site_name",
     "operator_id", "operator_name", "lat", "lon", "postcode", "city",
     "address", "hours_type", "n_connectors", "connector_types",
-    "charging_modes", "max_power_raw", "available_power_raw",
+    "charging_modes", "max_power_raw", "available_power_raw", "hours_raw",
 ]
+
+
+def unique_keys(pairs):
+    """Chave estável por ponto. Alguns operadores usam IDs simples (ex.: "202") que se repetem
+    noutros locais; nesses casos a chave passa a ser "local|ID". pairs = [(site_id, point_id)]."""
+    from collections import Counter
+    n = Counter(pid for _, pid in pairs)
+    return [pid if n[pid] == 1 else f"{site}|{pid}" for site, pid in pairs]
+
+
+def hours_text(oh):
+    """Horário de funcionamento em texto compacto (folhas do XML: "nome=valor;...")."""
+    if oh is None:
+        return None
+    parts = [f"{_ln(d)}={_text(d)}" for d in oh.iter() if d is not oh and len(d) == 0 and _text(d)]
+    return ";".join(parts) or None
 
 
 def parse_infra(src):
@@ -136,6 +157,7 @@ def parse_infra(src):
         op = _child(el, "operator")
         addr_line = _desc(el, "addressLine")
         oh = _child(el, "operatingHours")
+        oh_type = oh.get(XSI_TYPE) if oh is not None else None
         site = {
             "site_id": el.get("id"),
             "site_name": _value(_child(el, "name")),
@@ -146,7 +168,8 @@ def parse_infra(src):
             "postcode": _text(_desc(el, "postcode")),
             "city": _value(_desc(el, "city")),
             "address": _value(_desc(addr_line, "text")),
-            "hours_type": oh.get(XSI_TYPE) if oh is not None else None,
+            "hours_type": oh_type,
+            "hours_raw": hours_text(oh) if oh_type and "OpenAllHours" not in oh_type else None,
         }
         for rp in el.iter():
             if _ln(rp) != "refillPoint":
@@ -157,6 +180,7 @@ def parse_infra(src):
             powers = [p for c in conns if (p := _num(_text(_child(c, "maxPowerAtSocket")))) is not None]
             rows.append({
                 "point_id": rp.get("id"),
+                "point_id_raw": rp.get("id"),
                 "point_external_id": _text(_child(rp, "externalIdentifier")),
                 **site,
                 "n_connectors": len(conns),
@@ -166,4 +190,6 @@ def parse_infra(src):
                 "available_power_raw": _num(_text(_child(rp, "availableChargingPower"))),
             })
         el.clear(keep_tail=True)
+    for r, key in zip(rows, unique_keys([(r["site_id"], r["point_id_raw"]) for r in rows])):
+        r["point_id"] = key
     return rows, excerpt
