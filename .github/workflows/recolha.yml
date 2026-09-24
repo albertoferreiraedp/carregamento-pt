@@ -1,23 +1,26 @@
 name: Recolha
 
 on:
-  workflow_dispatch:
+  workflow_dispatch:          # disparado pelo cron-job.org a cada 5 min
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "2-59/5 * * * *"  # redundância, alinhada com o ciclo do feed (minutos 2, 7, 12, ...)
 
 concurrency:
   group: recolha
   cancel-in-progress: false
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   recolha:
     runs-on: ubuntu-24.04
     timeout-minutes: 8
     env:
-      REPO_URL: https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+      # Estado e arquivo vivem no repositório PRIVADO (variável DATA_REPO + segredo DATA_TOKEN).
+      DATA_URL: https://x-access-token:${{ secrets.DATA_TOKEN }}@github.com/${{ vars.DATA_REPO }}.git
+      # Repositório público atual: só usado uma vez, para migrar o estado existente.
+      PUBLIC_URL: https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
       STATE_DIR: ${{ github.workspace }}/state
       DATA_DIR: ${{ github.workspace }}/data
     steps:
@@ -35,29 +38,37 @@ jobs:
           git config --global user.name "coletor"
           git config --global user.email "coletor@users.noreply.github.com"
 
-      - name: Obter estado (branch state)
+      - name: Obter estado
         run: |
-          if git ls-remote --exit-code --heads "$REPO_URL" state >/dev/null; then
-            git clone -q --depth 1 --branch state "$REPO_URL" state
+          if git ls-remote --exit-code --heads "$DATA_URL" state >/dev/null; then
+            git clone -q --depth 1 --branch state "$DATA_URL" state
+          elif git ls-remote --exit-code --heads "$PUBLIC_URL" state >/dev/null; then
+            echo "Migração: estado ainda no repositório público; copiado para o privado neste run."
+            git clone -q --depth 1 --branch state "$PUBLIC_URL" state
           else
-            mkdir state && git -C state init -q -b state && git -C state remote add origin "$REPO_URL"
+            mkdir state && git -C state init -q -b state
           fi
+          git -C state remote remove origin 2>/dev/null || true
+          git -C state remote add origin "$DATA_URL"
 
       - name: Recolher
         run: python -m coletor.collect
 
       - name: Dias por arquivar
         id: arq
-        run: python -m coletor.archive pending
+        run: |
+          python -m coletor.archive pending
+          if git ls-remote --exit-code --heads "$DATA_URL" data >/dev/null; then
+            echo "data_ok=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "O branch data ainda não existe no repositório privado: correr o workflow 'Migrar dados'. Os dias ficam guardados no estado até lá."
+            echo "data_ok=0" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Exportar para branch data
-        if: steps.arq.outputs.pending != '0'
+        if: steps.arq.outputs.pending != '0' && steps.arq.outputs.data_ok == '1'
         run: |
-          if git ls-remote --exit-code --heads "$REPO_URL" data >/dev/null; then
-            git clone -q --depth 1 --filter=blob:none --sparse --branch data "$REPO_URL" data
-          else
-            mkdir data && git -C data init -q -b data && git -C data remote add origin "$REPO_URL"
-          fi
+          git clone -q --depth 1 --filter=blob:none --sparse --branch data "$DATA_URL" data
           python -m coletor.archive export
           cd data
           git add --sparse -A .
@@ -65,7 +76,7 @@ jobs:
           git push -q origin HEAD:data
 
       - name: Limpar estado arquivado
-        if: steps.arq.outputs.pending != '0'
+        if: steps.arq.outputs.pending != '0' && steps.arq.outputs.data_ok == '1'
         run: python -m coletor.archive cleanup
 
       - name: Guardar estado
