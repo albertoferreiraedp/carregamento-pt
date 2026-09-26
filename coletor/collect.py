@@ -8,10 +8,13 @@ import gzip
 import io
 import json
 import os
+import shutil
 import sys
+import tempfile
 import time
 import traceback
 from collections import Counter
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
 import requests
@@ -20,6 +23,7 @@ from . import config as C
 from .parse import INFRA_FIELDS, SITE_FIELDS, fill_rates, parse_infra, parse_status, tariff_components, unique_keys
 
 SUMMARY = []
+SAMPLE_WRITTEN = False  # já foi gravada a amostra desta execução (evita uma segunda linha "falha")
 
 
 def say(line=""):
@@ -58,11 +62,12 @@ def pick_headers(h):
     return out
 
 
-def fetch(url, extra_headers=None):
+def fetch(url, extra_headers=None, retries=None):
     """Devolve (conteúdo, código HTTP, cabeçalhos relevantes, início do pedido)."""
     last = None
+    retries = retries or C.HTTP_RETRIES
     headers = {"User-Agent": C.USER_AGENT, "Accept-Encoding": "gzip", **(extra_headers or {})}
-    for attempt in range(C.HTTP_RETRIES):
+    for attempt in range(retries):
         start = datetime.now(timezone.utc)
         try:
             r = requests.get(url, timeout=C.HTTP_TIMEOUT, headers=headers)
@@ -71,7 +76,8 @@ def fetch(url, extra_headers=None):
             return r.content, r.status_code, pick_headers(r.headers), start
         except Exception as e:  # noqa: BLE001
             last = e
-            time.sleep(5 * (attempt + 1) ** 2)
+            if attempt < retries - 1:  # sem pausa depois da última tentativa
+                time.sleep(5 * (attempt + 1) ** 2)
     raise RuntimeError(f"{url}: {last}")
 
 
@@ -92,15 +98,50 @@ class FeedError(Exception):
     pass
 
 
+@contextmanager
+def atomic_write(path, mode="wb"):
+    """Grava num temporário e só no fim substitui o ficheiro final (os.replace é atómico).
+
+    Um corte a meio deixa o ficheiro anterior intacto. Os temporários ficam em STATE_DIR/.tmp/
+    (mesmo disco, fora das pastas por data que o arquivo percorre).
+    mode: "wb" (binário), "w" (texto), "gz" (texto gzip), "gzb" (binário gzip).
+    """
+    tmp_dir = C.STATE_DIR / ".tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=tmp_dir, prefix=path.name + ".")
+    os.close(fd)
+    try:
+        if mode == "gz":
+            f = gzip.open(tmp, "wt", encoding="utf-8", newline="")
+        elif mode == "gzb":
+            f = gzip.open(tmp, "wb")
+        elif mode == "w":
+            f = open(tmp, "w", encoding="utf-8", newline="")
+        else:
+            f = open(tmp, "wb")
+        with f:
+            yield f
+        with open(tmp, "rb") as g:
+            os.fsync(g.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise
+
+
 def save_debug(raw, err):
     """Guarda início e fim de uma resposta inválida, para diagnóstico."""
     d = C.STATE_DIR / "debug"
     d.mkdir(parents=True, exist_ok=True)
     head = raw[:1500].decode("utf-8", "replace")
     tail = raw[-1500:].decode("utf-8", "replace")
-    (d / "ultima_resposta_invalida.txt").write_text(
-        f"{datetime.now(timezone.utc):%Y-%m-%dT%H:%M:%SZ}\n{err}\nbytes={len(raw)}\n"
-        f"--- INÍCIO ---\n{head}\n--- FIM ---\n{tail}\n", encoding="utf-8")
+    with atomic_write(d / "ultima_resposta_invalida.txt", "w") as f:
+        f.write(f"{datetime.now(timezone.utc):%Y-%m-%dT%H:%M:%SZ}\n{err}\nbytes={len(raw)}\n"
+                f"--- INÍCIO ---\n{head}\n--- FIM ---\n{tail}\n")
 
 
 def fetch_parse_status(cond=None, attempts=2, wait_s=20):
@@ -131,6 +172,38 @@ def fetch_parse_status(cond=None, attempts=2, wait_s=20):
     raise FeedError(last)
 
 
+def fetch_parse_infra(deadline):
+    """Descarrega e lê o inventário, com a mesma proteção do estado (resposta truncada ou falhada).
+
+    Um pedido por tentativa; até INFRA_ATTEMPTS tentativas, com pausa entre elas, mas nenhuma
+    começa depois de `deadline` (time.time()). Devolve (raw, pontos, excerto, locais).
+    """
+    last = "prazo esgotado"
+    for i in range(C.INFRA_ATTEMPTS):
+        if i:
+            if time.time() + C.INFRA_RETRY_WAIT_S > deadline:
+                last += " · sem tempo para nova tentativa"
+                break
+            time.sleep(C.INFRA_RETRY_WAIT_S)
+        try:
+            raw, _, _, _ = fetch(C.INFRA_URL, retries=1)
+        except Exception as e:  # noqa: BLE001
+            last = f"download falhou: {e}"
+            continue
+        try:
+            rows, excerpt, sites = parse_infra(io.BytesIO(raw))
+        except Exception as e:  # noqa: BLE001 — XML inválido ou truncado
+            last = f"XML inválido ({len(raw)/1e6:.1f} MB): {type(e).__name__}: {e}"
+            save_debug(raw, last)
+            continue
+        if not rows:
+            last = f"inventário sem pontos lidos ({len(raw)/1e6:.1f} MB)"
+            save_debug(raw, last)
+            continue
+        return raw, rows, excerpt, sites
+    raise FeedError(last)
+
+
 def load_json(path, default=None):
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -139,13 +212,15 @@ def load_json(path, default=None):
 
 
 def save_json(path, obj):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(obj, ensure_ascii=False, indent=1), encoding="utf-8")
+    with atomic_write(path, "w") as f:
+        f.write(json.dumps(obj, ensure_ascii=False, indent=1))
 
 
 def append_gz_csv(path, header, rows):
     """Acrescenta a um CSV gzip (membros gzip concatenados são válidos).
 
+    O ficheiro é copiado com o novo membro para um temporário e só depois substituído:
+    um corte a meio nunca deixa o ficheiro ilegível.
     Se o ficheiro existir com outro cabeçalho (mudança de versão do coletor),
     é renomeado para <nome>.vN.csv.gz e começa-se um ficheiro novo.
     """
@@ -160,11 +235,15 @@ def append_gz_csv(path, header, rows):
                 n += 1
             path.rename(path.parent / f"{stem}.v{n}.csv.gz")
     new = not path.exists()
-    with gzip.open(path, "at", encoding="utf-8", newline="") as f:
-        w = csv.writer(f)
-        if new:
-            w.writerow(header)
-        w.writerows(rows)
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    if new:
+        w.writerow(header)
+    w.writerows(rows)
+    old = b"" if new else path.read_bytes()
+    with atomic_write(path, "wb") as f:
+        f.write(old)
+        f.write(gzip.compress(buf.getvalue().encode("utf-8")))
 
 
 def load_last_tariffs():
@@ -176,7 +255,7 @@ def load_last_tariffs():
 
 
 def save_last_tariffs(d):
-    with gzip.open(C.STATE_DIR / "last_tariffs.csv.gz", "wt", encoding="utf-8", newline="") as f:
+    with atomic_write(C.STATE_DIR / "last_tariffs.csv.gz", "gz") as f:
         w = csv.writer(f)
         w.writerow(["point_id", "tarifario"])
         w.writerows(sorted(d.items()))
@@ -212,8 +291,7 @@ def load_last_status():
 
 
 def save_last_status(d):
-    p = C.STATE_DIR / "last_status.csv.gz"
-    with gzip.open(p, "wt", encoding="utf-8", newline="") as f:
+    with atomic_write(C.STATE_DIR / "last_status.csv.gz", "gz") as f:
         w = csv.writer(f)
         w.writerow(["point_id", "status"])
         w.writerows(sorted(d.items()))
@@ -227,31 +305,40 @@ SAMPLE_COLS = ["ts_utc", "ok", "http", "version", "pub_utc", "fetch_utc", "age_s
 
 def record_sample(now, **kw):
     """Uma linha por run. version: nova | repetida | antiga | 304 | sem_pub | falha."""
+    global SAMPLE_WRITTEN
     row = {c: "" for c in SAMPLE_COLS}
     row.update({"ts_utc": iso(now), "ok": 0, "n_points": 0, "n_events": 0, "bytes": 0,
                 "version": "falha"})
     row.update({k: v for k, v in kw.items() if k in row})
     append_gz_csv(C.STATE_DIR / "samples" / f"{lisbon_date(now)}.csv.gz",
                   SAMPLE_COLS, [[row[c] for c in SAMPLE_COLS]])
+    SAMPLE_WRITTEN = True
 
 
 # ---------------------------------------------------------------- estático
-def refresh_static(now):
+def refresh_static(now, t0, waited=False):
+    """Atualiza o inventário se tiver mais de STATIC_REFRESH_H horas.
+
+    Orçamento de tempo: se a execução já esperou pela versão seguinte do feed, ou se já passaram
+    mais de STATIC_MAX_START_S, fica para a execução seguinte. Se o inventário falhar, mantém-se
+    o anterior (static_meta.json não muda, por isso a execução seguinte tenta de novo).
+    """
     meta_p = C.STATE_DIR / "static_meta.json"
     meta = load_json(meta_p, {})
     if meta.get("ts_utc"):
         age_h = (now - datetime.fromisoformat(meta["ts_utc"].replace("Z", "+00:00"))).total_seconds() / 3600
         if age_h < C.STATIC_REFRESH_H:
             return None
-    try:
-        raw, _, _, _ = fetch(C.INFRA_URL)
-    except Exception as e:  # noqa: BLE001
-        say(f"> ⚠️ Inventário estático não atualizado: {e}")
+    elapsed = time.time() - t0
+    if waited or elapsed > C.STATIC_MAX_START_S:
+        say(f"- Inventário adiado para a execução seguinte (orçamento de tempo: "
+            f"{'houve espera pela versão seguinte · ' if waited else ''}{elapsed:.0f} s decorridos).")
         return None
-    rows, excerpt, sites = parse_infra(io.BytesIO(raw))
-    if not rows:
-        say("> ⚠️ Inventário estático sem pontos lidos. Excerto do XML:")
-        say("```xml\n" + (raw[:2500].decode("utf-8", "replace")) + "\n```")
+    try:
+        raw, rows, excerpt, sites = fetch_parse_infra(t0 + C.INFRA_DEADLINE_S)
+    except FeedError as e:
+        say(f"> ⚠️ Inventário não atualizado: {str(e)[:300]}. Mantém-se o anterior; "
+            "nova tentativa na execução seguinte.")
         return None
 
     # Eventos de presença no inventário (entrada/saída de tomadas).
@@ -267,17 +354,17 @@ def refresh_static(now):
         append_gz_csv(C.STATE_DIR / "static_events" / f"{lisbon_date(now)}.csv.gz",
                       ["ts_utc", "point_id", "present"], ev)
 
-    with gzip.open(old_p, "wt", encoding="utf-8", newline="") as f:
+    with atomic_write(old_p, "gz") as f:
         w = csv.DictWriter(f, fieldnames=INFRA_FIELDS)
         w.writeheader()
         w.writerows(rows)
-    with gzip.open(C.STATE_DIR / "static_sites.csv.gz", "wt", encoding="utf-8", newline="") as f:
+    with atomic_write(C.STATE_DIR / "static_sites.csv.gz", "gz") as f:
         w = csv.DictWriter(f, fieldnames=SITE_FIELDS, extrasaction="ignore")
         w.writeheader()
         w.writerows(sites)
     # preenchimento de cada atributo (para decidir o que é utilizável)
     fr_s, fr_p = fill_rates(sites, SITE_FIELDS), fill_rates(rows, INFRA_FIELDS)
-    with open(C.STATE_DIR / "static_fillrate.csv", "w", encoding="utf-8", newline="") as f:
+    with atomic_write(C.STATE_DIR / "static_fillrate.csv", "w") as f:
         w = csv.writer(f); w.writerow(["nivel", "campo", "pct_preenchido"])
         w.writerows([("local", k, v) for k, v in fr_s.items()] + [("ponto", k, v) for k, v in fr_p.items()])
     say("\n### Preenchimento dos atributos do inventário (%)")
@@ -291,8 +378,7 @@ def refresh_static(now):
     wk = now.astimezone(C.TZ).isocalendar()
     rawdir = C.STATE_DIR / "raw_infra"
     if not any(rawdir.glob(f"*W{wk.week:02d}*")) if rawdir.exists() else True:
-        rawdir.mkdir(parents=True, exist_ok=True)
-        with gzip.open(rawdir / f"{day}.W{wk.week:02d}.infra.xml.gz", "wb") as f:
+        with atomic_write(rawdir / f"{day}.W{wk.week:02d}.infra.xml.gz", "gzb") as f:
             f.write(raw)
     save_json(meta_p, {"ts_utc": iso(now), "n_points": len(rows),
                        "n_sites": len({r["site_id"] for r in rows})})
@@ -330,7 +416,7 @@ def operators_report(rows):
         names[key] = r["operator_name"] or "?"
     total = sum(pts.values())
     out = C.STATE_DIR / "operators_ranking.csv"
-    with open(out, "w", encoding="utf-8", newline="") as f:
+    with atomic_write(out, "w") as f:
         w = csv.writer(f)
         w.writerow(["rank", "operator_id", "operator_name", "locais", "pontos", "pct_pontos"])
         for i, (k, n) in enumerate(pts.most_common(), 1):
@@ -350,6 +436,7 @@ def main():
     t0 = time.time()
     now = datetime.now(timezone.utc)
     C.STATE_DIR.mkdir(parents=True, exist_ok=True)
+    shutil.rmtree(C.STATE_DIR / ".tmp", ignore_errors=True)  # restos de uma execução cortada
     force = "--force" in sys.argv
 
     last = load_json(C.STATE_DIR / "last_run.json", {})
@@ -370,8 +457,9 @@ def main():
     try:
         return process(now, t0, last)
     except Exception as e:  # noqa: BLE001 — erro inesperado: regista e falha o run
-        record_sample(now, err=f"erro interno: {type(e).__name__}: {e}"[:300],
-                      secs=round(time.time() - t0, 1))
+        if not SAMPLE_WRITTEN:  # nunca uma segunda amostra para a mesma execução
+            record_sample(now, err=f"erro interno: {type(e).__name__}: {e}"[:300],
+                          secs=round(time.time() - t0, 1))
         say(f"> ❌ Erro interno: `{type(e).__name__}: {e}`")
         say("```\n" + traceback.format_exc()[-3000:] + "\n```")
         raise
@@ -399,7 +487,7 @@ def process(now, t0, last):
     last_pub = parse_ts(last.get("pub_utc"))
 
     # Versão já registada (304 ou mesmo publicationTime): esperar pela próxima publicação e tentar uma vez.
-    wait_s = 0
+    wait_s, waited = 0, False
     if last_pub and (res["http"] == 304 or (res["pub"] is not None and res["pub"] <= last_pub)):
         target = last_pub + timedelta(seconds=C.PUBLISH_EVERY_S + C.READY_MARGIN_S)
         while target <= datetime.now(timezone.utc):          # se já passou mais de um ciclo
@@ -408,7 +496,7 @@ def process(now, t0, last):
         if wait <= C.MAX_WAIT_S:
             say(f"- Versão já registada; a aguardar {wait:.0f} s pela publicação seguinte.")
             time.sleep(max(0, wait))
-            wait_s = round(wait)
+            wait_s, waited = round(wait), True
             try:
                 res2 = fetch_parse_status(cond)
                 if res2["http"] != 304 and res2["pub"] is not None and res2["pub"] > last_pub:
@@ -490,8 +578,7 @@ def process(now, t0, last):
     day = lisbon_date(now)
     raw_day = C.STATE_DIR / "raw" / f"{day}.status.xml.gz"
     if day <= C.RAW_DAILY_UNTIL and not raw_day.exists():  # 1 cópia bruta por dia
-        raw_day.parent.mkdir(parents=True, exist_ok=True)
-        with gzip.open(raw_day, "wb") as f:
+        with atomic_write(raw_day, "gzb") as f:
             f.write(raw)
 
     record_sample(now, ok=1, version=version, n_points=len(cur), n_events=len(events),
@@ -516,22 +603,26 @@ def process(now, t0, last):
     for st, n in Counter(cur.values()).most_common():
         say(f"| `{st or '(vazio)'}` | {n} |")
 
-    static = refresh_static(now)
-    if static:
-        srows, sexcerpt = static
-        sids = {r["point_id"] for r in srows}
-        in_static = sum(pid in sids for pid in cur) / len(cur)
-        in_dyn = sum(pid in cur for pid in sids) / len(sids)
-        say(f"\n- Inventário: {len(srows)} pontos · dinâmico∩estático: "
-            f"{in_static:.1%} dos pontos dinâmicos, {in_dyn:.1%} dos estáticos")
-        if not C.PUBLIC_SUMMARY:
-            static_diagnostics(srows)
-        operators_report(srows)
-        if not prev and not C.PUBLIC_SUMMARY:  # primeira execução: mostrar estrutura para validação
-            say("\n<details><summary>Excerto XML — estado</summary>\n\n```xml\n"
-                f"{excerpt}\n```\n</details>")
-            say("\n<details><summary>Excerto XML — inventário</summary>\n\n```xml\n"
-                f"{sexcerpt}\n```\n</details>")
+    # O estado já está gravado: um problema no inventário nunca faz falhar a execução.
+    try:
+        static = refresh_static(now, t0, waited)
+        if static:
+            srows, sexcerpt = static
+            sids = {r["point_id"] for r in srows}
+            in_static = sum(pid in sids for pid in cur) / len(cur)
+            in_dyn = sum(pid in cur for pid in sids) / len(sids)
+            say(f"\n- Inventário: {len(srows)} pontos · dinâmico∩estático: "
+                f"{in_static:.1%} dos pontos dinâmicos, {in_dyn:.1%} dos estáticos")
+            if not C.PUBLIC_SUMMARY:
+                static_diagnostics(srows)
+            operators_report(srows)
+            if not prev and not C.PUBLIC_SUMMARY:  # primeira execução: mostrar estrutura para validação
+                say("\n<details><summary>Excerto XML — estado</summary>\n\n```xml\n"
+                    f"{excerpt}\n```\n</details>")
+                say("\n<details><summary>Excerto XML — inventário</summary>\n\n```xml\n"
+                    f"{sexcerpt}\n```\n</details>")
+    except Exception as e:  # noqa: BLE001
+        say(f"> ⚠️ Inventário não atualizado ({type(e).__name__}: {str(e)[:300]}). Mantém-se o anterior.")
     return 0
 
 

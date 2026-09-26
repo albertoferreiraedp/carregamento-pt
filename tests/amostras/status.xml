@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Amostra SINTÉTICA (IDs fictícios), com a estrutura DATEX II do estado.
+     {pub} e {st_*} são substituídos nos testes. -->
+<d2:payload xmlns:d2="http://datex2.eu/schema/3/d2Payload" xmlns:egi="http://datex2.eu/schema/3/energyInfrastructure"
+            xmlns:com="http://datex2.eu/schema/3/common">
+  <com:publicationTime>{pub}</com:publicationTime>
+  <egi:energyInfrastructureSiteStatus>
+    <egi:reference id="SITE-A"/>
+    <egi:refillPointStatus>
+      <egi:reference id="PT-A1"/><egi:status>{st_a1}</egi:status><egi:lastUpdated>{pub}</egi:lastUpdated>
+      <egi:electricEnergyMixOverride><egi:pricingPolicy>pricePerDeliveryUnit</egi:pricingPolicy><egi:minimumDeliveryFee>0.30</egi:minimumDeliveryFee></egi:electricEnergyMixOverride>
+    </egi:refillPointStatus>
+    <egi:refillPointStatus>
+      <egi:reference id="PT-A2"/><egi:status>{st_a2}</egi:status><egi:lastUpdated>{pub}</egi:lastUpdated>
+    </egi:refillPointStatus>
+  </egi:energyInfrastructureSiteStatus>
+  <egi:energyInfrastructureSiteStatus>
+    <egi:reference id="SITE-B"/>
+    <egi:refillPointStatus>
+      <egi:reference id="PT-B1"/><egi:status>{st_b1}</egi:status><egi:lastUpdated>{pub}</egi:lastUpdated>
+    </egi:refillPointStatus>
+  </egi:energyInfrastructureSiteStatus>
+  <egi:energyInfrastructureSiteStatus>
+    <egi:reference id="SITE-C"/>
+    <egi:refillPointStatus>
+      <egi:reference id="PT-C1"/><egi:status>{st_c1}</egi:status><egi:lastUpdated>{pub}</egi:lastUpdated>
+    </egi:refillPointStatus>
+  </egi:energyInfrastructureSiteStatus>
+</d2:payload>

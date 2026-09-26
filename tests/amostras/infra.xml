@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Amostra SINTÉTICA (IDs e nomes fictícios), com a estrutura DATEX II do inventário. -->
+<d2:payload xmlns:d2="http://datex2.eu/schema/3/d2Payload" xmlns:egi="http://datex2.eu/schema/3/energyInfrastructure"
+            xmlns:com="http://datex2.eu/schema/3/common" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <com:publicationTime>2026-01-01T00:00:00Z</com:publicationTime>
+  <egi:energyInfrastructureTable id="t1">
+    <egi:energyInfrastructureSite id="SITE-A">
+      <egi:name><com:values><com:value lang="pt">Local A</com:value></com:values></egi:name>
+      <egi:lastUpdated>2026-01-01T00:00:00Z</egi:lastUpdated>
+      <egi:operatingHours xsi:type="com:OpenAllHours"/>
+      <egi:operator id="OPA"><egi:name><com:values><com:value>Operador A</com:value></com:values></egi:name></egi:operator>
+      <egi:locationReference><com:latitude>38.70</com:latitude><com:longitude>-9.14</com:longitude>
+        <com:postcode>1000-001</com:postcode><com:city><com:values><com:value>Lisboa</com:value></com:values></com:city></egi:locationReference>
+      <egi:energyInfrastructureStation id="ST-A1">
+        <egi:numberOfRefillPoints>2</egi:numberOfRefillPoints>
+        <egi:refillPoint id="PT-A1">
+          <egi:connector><egi:connectorType>iec62196T2COMBO</egi:connectorType><egi:chargingMode>mode4DC</egi:chargingMode><egi:maxPowerAtSocket>50000</egi:maxPowerAtSocket></egi:connector>
+        </egi:refillPoint>
+        <egi:refillPoint id="PT-A2">
+          <egi:connector><egi:connectorType>chademo</egi:connectorType><egi:chargingMode>mode4DC</egi:chargingMode><egi:maxPowerAtSocket>50000</egi:maxPowerAtSocket></egi:connector>
+        </egi:refillPoint>
+      </egi:energyInfrastructureStation>
+    </egi:energyInfrastructureSite>
+    <egi:energyInfrastructureSite id="SITE-B">
+      <egi:name><com:values><com:value lang="pt">Local B</com:value></com:values></egi:name>
+      <egi:operatingHours xsi:type="com:OpenAllHours"/>
+      <egi:operator id="OPB"><egi:name><com:values><com:value>Operador B</com:value></com:values></egi:name></egi:operator>
+      <egi:locationReference><com:latitude>41.15</com:latitude><com:longitude>-8.61</com:longitude></egi:locationReference>
+      <egi:energyInfrastructureStation id="ST-B1">
+        <egi:numberOfRefillPoints>1</egi:numberOfRefillPoints>
+        <egi:refillPoint id="PT-B1">
+          <egi:connector><egi:connectorType>iec62196T2</egi:connectorType><egi:chargingMode>mode3AC3p</egi:chargingMode><egi:maxPowerAtSocket>22000</egi:maxPowerAtSocket></egi:connector>
+        </egi:refillPoint>
+      </egi:energyInfrastructureStation>
+    </egi:energyInfrastructureSite>
+    <egi:energyInfrastructureSite id="SITE-C">
+      <egi:name><com:values><com:value lang="pt">Local C</com:value></com:values></egi:name>
+      <egi:operatingHours xsi:type="com:OpenAllHours"/>
+      <egi:operator id="OPB"><egi:name><com:values><com:value>Operador B</com:value></com:values></egi:name></egi:operator>
+      <egi:locationReference><com:latitude>40.20</com:latitude><com:longitude>-8.41</com:longitude></egi:locationReference>
+      <egi:energyInfrastructureStation id="ST-C1">
+        <egi:numberOfRefillPoints>1</egi:numberOfRefillPoints>
+        <egi:refillPoint id="PT-C1">
+          <egi:connector><egi:connectorType>iec62196T2</egi:connectorType><egi:chargingMode>mode3AC3p</egi:chargingMode><egi:maxPowerAtSocket>11000</egi:maxPowerAtSocket></egi:connector>
+        </egi:refillPoint>
+      </egi:energyInfrastructureStation>
+    </egi:energyInfrastructureSite>
+  </egi:energyInfrastructureTable>
+</d2:payload>

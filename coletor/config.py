@@ -19,6 +19,15 @@ MIN_INTERVAL_S = 150
 # Periodicidade de atualização do inventário estático.
 STATIC_REFRESH_H = 6
 
+# Orçamento de tempo do inventário (o job tem 12 min). Se a execução já esperou pela versão
+# seguinte do feed ou já passaram mais de STATIC_MAX_START_S, o inventário fica para a execução
+# seguinte. Um pedido por tentativa, até INFRA_ATTEMPTS tentativas com INFRA_RETRY_WAIT_S de pausa;
+# nenhuma tentativa começa depois de INFRA_DEADLINE_S desde o início da execução.
+STATIC_MAX_START_S = 180
+INFRA_ATTEMPTS = 2
+INFRA_RETRY_WAIT_S = 20
+INFRA_DEADLINE_S = 420
+
 # Um dia só é arquivado depois das 00:10 (Lisboa) do dia seguinte.
 ARCHIVE_GRACE_MIN = 10
 
