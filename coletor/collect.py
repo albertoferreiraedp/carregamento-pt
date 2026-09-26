@@ -425,6 +425,9 @@ def process(now, t0, last):
         return 0
 
     rows, excerpt = res["rows"], res["excerpt"]
+    if not (C.STATE_DIR / "last_status.csv.gz").exists():
+        say("> ⚠️ **Estado anterior vazio**: esta execução recomeça o registo (todos os pontos como eventos). "
+            "Só é normal na primeira execução de sempre; se aparecer outra vez, há um problema na leitura do estado.")
     # IDs repetidos entre locais diferentes (operadores com IDs simples): chave "local|ID"
     keys = unique_keys([(r[4], r[0]) for r in rows])
     n_coll = sum(1 for k in keys if "|" in k)
