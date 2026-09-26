@@ -19,12 +19,14 @@ jobs:
     env:
       # Estado e arquivo vivem no repositório PRIVADO (variável DATA_REPO + segredo DATA_TOKEN).
       DATA_URL: https://x-access-token:${{ secrets.DATA_TOKEN }}@github.com/${{ vars.DATA_REPO }}.git
-      # Repositório público atual: só usado uma vez, para migrar o estado existente.
-      PUBLIC_URL: https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
       STATE_DIR: ${{ github.workspace }}/state
       DATA_DIR: ${{ github.workspace }}/data
     steps:
       - uses: actions/checkout@v5
+        with:
+          # Sem isto, o checkout grava o token do repositório público na configuração do git
+          # e os comandos seguintes usam-no no lugar do DATA_TOKEN (sem acesso ao privado).
+          persist-credentials: false
 
       - uses: actions/setup-python@v6
         with:
@@ -40,13 +42,18 @@ jobs:
 
       - name: Obter estado
         run: |
-          if git ls-remote --exit-code --heads "$DATA_URL" state >/dev/null; then
+          # 0 = branch existe · 2 = branch não existe · outro = erro de acesso (falha o run, nunca recomeça do zero)
+          set +e; git ls-remote --exit-code --heads "$DATA_URL" state >/dev/null; rc=$?; set -e
+          if [ "$rc" = 0 ]; then
             git clone -q --depth 1 --branch state "$DATA_URL" state
-          elif git ls-remote --exit-code --heads "$PUBLIC_URL" state >/dev/null; then
-            echo "Migração: estado ainda no repositório público; copiado para o privado neste run."
-            git clone -q --depth 1 --branch state "$PUBLIC_URL" state
-          else
+            echo "Estado lido do repositório privado."
+          elif [ "$rc" = 2 ]; then
+            echo "::warning::Branch state inexistente no repositório privado: a iniciar estado vazio."
             mkdir state && git -C state init -q -b state
+            touch state/.novo
+          else
+            echo "::error::Sem acesso ao repositório privado (código $rc). Confirmar DATA_TOKEN e DATA_REPO. Run interrompido para não perder o estado."
+            exit 1
           fi
           git -C state remote remove origin 2>/dev/null || true
           git -C state remote add origin "$DATA_URL"
@@ -58,11 +65,15 @@ jobs:
         id: arq
         run: |
           python -m coletor.archive pending
-          if git ls-remote --exit-code --heads "$DATA_URL" data >/dev/null; then
+          set +e; git ls-remote --exit-code --heads "$DATA_URL" data >/dev/null; rc=$?; set -e
+          if [ "$rc" = 0 ]; then
             echo "data_ok=1" >> "$GITHUB_OUTPUT"
-          else
-            echo "O branch data ainda não existe no repositório privado: correr o workflow 'Migrar dados'. Os dias ficam guardados no estado até lá."
+          elif [ "$rc" = 2 ]; then
+            echo "::warning::Branch data inexistente no repositório privado. Os dias ficam no estado até existir."
             echo "data_ok=0" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::Sem acesso ao branch data (código $rc)."
+            exit 1
           fi
 
       - name: Exportar para branch data
@@ -82,6 +93,13 @@ jobs:
       - name: Guardar estado
         if: always()
         run: |
+          [ -d state ] || { echo "Sem estado para guardar."; exit 0; }
+          # Proteção: um estado novo nunca substitui um estado que já exista no privado.
+          if [ -f state/.novo ]; then
+            rm state/.novo
+            set +e; git ls-remote --exit-code --heads "$DATA_URL" state >/dev/null; rc=$?; set -e
+            if [ "$rc" != 2 ]; then echo "::error::Já existe estado no privado (código $rc): não substituído."; exit 1; fi
+          fi
           cd state
           git checkout -q --orphan snap
           git add -A
