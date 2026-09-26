@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 import requests
 
 from . import config as C
-from .parse import INFRA_FIELDS, parse_infra, parse_status, tariff_components, unique_keys
+from .parse import INFRA_FIELDS, SITE_FIELDS, fill_rates, parse_infra, parse_status, tariff_components, unique_keys
 
 SUMMARY = []
 
@@ -248,7 +248,7 @@ def refresh_static(now):
     except Exception as e:  # noqa: BLE001
         say(f"> ⚠️ Inventário estático não atualizado: {e}")
         return None
-    rows, excerpt = parse_infra(io.BytesIO(raw))
+    rows, excerpt, sites = parse_infra(io.BytesIO(raw))
     if not rows:
         say("> ⚠️ Inventário estático sem pontos lidos. Excerto do XML:")
         say("```xml\n" + (raw[:2500].decode("utf-8", "replace")) + "\n```")
@@ -271,6 +271,29 @@ def refresh_static(now):
         w = csv.DictWriter(f, fieldnames=INFRA_FIELDS)
         w.writeheader()
         w.writerows(rows)
+    with gzip.open(C.STATE_DIR / "static_sites.csv.gz", "wt", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=SITE_FIELDS, extrasaction="ignore")
+        w.writeheader()
+        w.writerows(sites)
+    # preenchimento de cada atributo (para decidir o que é utilizável)
+    fr_s, fr_p = fill_rates(sites, SITE_FIELDS), fill_rates(rows, INFRA_FIELDS)
+    with open(C.STATE_DIR / "static_fillrate.csv", "w", encoding="utf-8", newline="") as f:
+        w = csv.writer(f); w.writerow(["nivel", "campo", "pct_preenchido"])
+        w.writerows([("local", k, v) for k, v in fr_s.items()] + [("ponto", k, v) for k, v in fr_p.items()])
+    say("\n### Preenchimento dos atributos do inventário (%)")
+    say("| Nível | Campo | % |")
+    say("|---|---|---|")
+    for lvl, fr in (("local", fr_s), ("ponto", fr_p)):
+        for k, v in fr.items():
+            say(f"| {lvl} | `{k}` | {v} |")
+    # cópia bruta semanal do inventário (reprocessamento de campos novos no futuro)
+    day = lisbon_date(now)
+    wk = now.astimezone(C.TZ).isocalendar()
+    rawdir = C.STATE_DIR / "raw_infra"
+    if not any(rawdir.glob(f"*W{wk.week:02d}*")) if rawdir.exists() else True:
+        rawdir.mkdir(parents=True, exist_ok=True)
+        with gzip.open(rawdir / f"{day}.W{wk.week:02d}.infra.xml.gz", "wb") as f:
+            f.write(raw)
     save_json(meta_p, {"ts_utc": iso(now), "n_points": len(rows),
                        "n_sites": len({r["site_id"] for r in rows})})
     return rows, excerpt

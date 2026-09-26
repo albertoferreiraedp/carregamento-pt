@@ -17,7 +17,7 @@ import pandas as pd
 
 from . import config as C
 
-KINDS = {"events": "csv", "samples": "csv", "static_events": "csv", "tariffs": "csv", "raw": "copy"}
+KINDS = {"events": "csv", "samples": "csv", "static_events": "csv", "tariffs": "csv", "raw": "copy", "raw_infra": "copy"}
 MANIFEST = C.STATE_DIR / ".archive_manifest.json"
 MANIFEST_HASH = C.STATE_DIR / ".static_hash_pending.txt"
 
@@ -68,20 +68,31 @@ def export():
                     df.to_parquet(dst_dir / f"{stem}.parquet", index=False, compression="zstd")
                 done.append(str(src))
 
-    # Instantâneo do inventário, só quando muda.
+    # Instantâneo do inventário (pontos e locais), só quando muda.
     sp = C.STATE_DIR / "static_points.csv.gz"
+    ss = C.STATE_DIR / "static_sites.csv.gz"
     hp = C.STATE_DIR / "static_archived_hash.txt"
     if sp.exists() and done:
-        with gzip.open(sp, "rb") as f:
-            h = hashlib.sha256(f.read()).hexdigest()
+        h = hashlib.sha256()
+        for f_ in (sp, ss):
+            if f_.exists():
+                with gzip.open(f_, "rb") as f:
+                    h.update(f.read())
+        h = h.hexdigest()
         if not hp.exists() or hp.read_text().strip() != h:
             now = datetime.now(C.TZ)
-            dst = C.DATA_DIR / f"{now:%Y}" / "static"
-            dst.mkdir(parents=True, exist_ok=True)
-            df = pd.read_csv(sp, dtype=str, compression="gzip")
-            for col in ("lat", "lon", "max_power_raw", "available_power_raw", "n_connectors"):
-                df[col] = pd.to_numeric(df[col], errors="coerce")
-            df.to_parquet(dst / f"{now:%Y-%m-%dT%H%M}.parquet", index=False, compression="zstd")
+            for f_, sub in ((sp, "static"), (ss, "static_sites")):
+                if not f_.exists():
+                    continue
+                dst = C.DATA_DIR / f"{now:%Y}" / sub
+                dst.mkdir(parents=True, exist_ok=True)
+                df = pd.read_csv(f_, dtype=str, compression="gzip")
+                for col in ("lat", "lon", "max_power_raw", "available_power_raw", "n_connectors", "voltage_max",
+                            "current_max", "parking_spaces", "pmr_spaces", "simultaneous_points", "n_points",
+                            "green_energy_share", "max_weight_t", "max_height_m", "max_length_m", "max_width_m"):
+                    if col in df:
+                        df[col] = pd.to_numeric(df[col], errors="coerce")
+                df.to_parquet(dst / f"{now:%Y-%m-%dT%H%M}.parquet", index=False, compression="zstd")
             MANIFEST_HASH.write_text(h)
 
     MANIFEST.write_text(json.dumps(done))
