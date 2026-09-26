@@ -22,4 +22,9 @@ Recolhe, a cada 5 minutos, o estado e o inventário dos pontos de carregamento p
 - Um erro de acesso ao estado **falha a execução**. Nunca recomeçar do zero por cima de um estado existente.
 - Ciclo do feed: publicado a cada 5 min (~4 s após cada múltiplo de 5), completo ~45–70 s depois; disparo nos minutos 2, 7, 12…; espera pela versão seguinte se a recebida for repetida; ETag ativo.
 - Chave dos pontos: ID do feed, ou `local|ID` quando o ID se repete noutro local.
+- Falha do inventário (truncado, sem resposta ou erro): **mantém-se o anterior**, com aviso no resumo; a execução não falha nem grava uma segunda amostra; a execução seguinte volta a tentar.
+- Orçamento de tempo (job de 12 min): o inventário só é atualizado se a execução não esperou pela versão seguinte e tem menos de 180 s; 1 pedido por tentativa, até 2 tentativas, nenhuma começa depois de 420 s.
+- "Guardar estado" corre com `!cancelled()`: um job cancelado (incluindo por limite de tempo) não publica estado.
+- Gravações atómicas: temporário em `STATE_DIR/.tmp/` + `os.replace`; os `.csv.gz` diários são copiados com o novo membro antes de substituir. Nunca escrever diretamente nos ficheiros do estado.
+- Testes: `python -m unittest discover tests -v` (amostras sintéticas em `tests/amostras/`, sem dados reais).
 - Testar alterações com ficheiros de amostra antes de alterar o workflow. Comentários e mensagens em PT-PT.

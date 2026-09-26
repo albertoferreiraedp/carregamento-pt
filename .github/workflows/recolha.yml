@@ -15,7 +15,7 @@ permissions:
 jobs:
   recolha:
     runs-on: ubuntu-24.04
-    timeout-minutes: 8
+    timeout-minutes: 12
     env:
       # Estado e arquivo vivem no repositório PRIVADO (variável DATA_REPO + segredo DATA_TOKEN).
       DATA_URL: https://x-access-token:${{ secrets.DATA_TOKEN }}@github.com/${{ vars.DATA_REPO }}.git
@@ -91,7 +91,8 @@ jobs:
         run: python -m coletor.archive cleanup
 
       - name: Guardar estado
-        if: always()
+        # Não corre se o job for cancelado (incluindo por limite de tempo): mantém-se o estado anterior.
+        if: ${{ !cancelled() }}
         run: |
           [ -d state ] || { echo "Sem estado para guardar."; exit 0; }
           # Proteção: um estado novo nunca substitui um estado que já exista no privado.
